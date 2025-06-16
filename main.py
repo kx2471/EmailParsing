@@ -1,76 +1,56 @@
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-import time
+import re
+import requests
+from bs4 import BeautifulSoup
+import pandas as pd
 
-def load_brands_from_file(filename):
-    with open(filename, "r", encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
+# 이메일 정규식
+EMAIL_REGEX = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 
-def search_official_site_naver(brand, driver):
+def extract_emails(url):
+    """requests + BeautifulSoup + regex 로 이메일 주소 추출"""
     try:
-        query = f"{brand} 공식 홈페이지"
-        driver.get(f"https://search.naver.com/search.naver?query={query}")
-        time.sleep(1.5)
-
-        # 1. '사이트' 영역
-        try:
-            link = driver.find_element(By.CSS_SELECTOR, "div.place_section_content a.url").get_attribute("href")
-            return link
-        except:
-            pass
-
-        # 2. '사이트' 묶음 (보통은 공식사이트 묶음)
-        try:
-            link = driver.find_element(By.CSS_SELECTOR, "ul.list_site li a").get_attribute("href")
-            return link
-        except:
-            pass
-
-        # 3. 웹문서 상단 링크 (가장 일반적인 경우)
-        try:
-            link = driver.find_element(By.CSS_SELECTOR, "a.api_txt_lines.total_tit").get_attribute("href")
-            return link
-        except:
-            pass
-
-        # 4. 지식패널이나 뉴스 등은 무시하고, 검색결과 중 a 태그 중 유의미한 첫 링크
-        try:
-            all_links = driver.find_elements(By.CSS_SELECTOR, "a")
-            for a in all_links:
-                href = a.get_attribute("href")
-                if href and href.startswith("http") and "naver.com" not in href:
-                    return href
-        except:
-            pass
-
-        return "❌ 실패: 링크를 찾지 못함"
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
     except Exception as e:
-        return f"❌ 예외 발생: {str(e)}"
+        print(f"[ERROR] {url} → 요청 실패: {e}")
+        return set()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    emails = set()
+
+    # 1) mailto 링크
+    for a in soup.find_all("a", href=True):
+        if a["href"].startswith("mailto:"):
+            emails.add(a["href"].split(":",1)[1].strip())
+
+    # 2) 본문 텍스트에서 정규식 매칭
+    text = soup.get_text()
+    for m in EMAIL_REGEX.findall(text):
+        emails.add(m)
+
+    return emails
 
 def main():
-    brands = load_brands_from_file("브랜드리스트.txt")
+    infile  = "브랜드_홈페이지_결과_naver_최상단.txt"
+    outfile = "브랜드_이메일_결과.xlsx"
 
-    options = webdriver.ChromeOptions()
-    options.add_argument("--start-maximized")
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    data = []
+    with open(infile, encoding="utf-8") as f:
+        for line in f:
+            parts = line.strip().split("\t")
+            if len(parts) < 2:
+                continue
+            brand, url = parts[0], parts[1]
+            print(f"▶ {brand} → {url}")
+            emails = extract_emails(url)
+            email_str = ", ".join(sorted(emails)) if emails else ""
+            print(f"   found: {email_str}\n")
+            data.append({"브랜드명": brand, "홈페이지": url, "이메일": email_str})
 
-    results = []
-
-    for idx, brand in enumerate(brands, 1):
-        print(f"{idx}/{len(brands)} ▶ {brand} (네이버)...")
-        link = search_official_site_naver(brand, driver)
-        print(f"🔗 결과: {link}")
-        results.append((brand, link))
-
-    driver.quit()
-
-    with open("브랜드_홈페이지_결과_naver_최상단.txt", "w", encoding="utf-8") as f:
-        for brand, link in results:
-            f.write(f"{brand}\t{link}\n")
-
-    print("\n✅ 네이버 최상단 링크 수집 완료!")
+    # 결과를 엑셀로 저장
+    df = pd.DataFrame(data)
+    df.to_excel(outfile, index=False)
+    print(f"\n✅ 완료! '{outfile}'에 저장되었습니다.")
 
 if __name__ == "__main__":
     main()
